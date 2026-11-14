@@ -122,7 +122,7 @@ def advisory(rows, use_ai=True):
 
 def search_papers(query, n=5):
     """NASA NTRS search. Returns [{'id','title','url','abstract'}]. Check the first results by eye."""
-    r = requests.get("https://ntrs.nasa.gov/api/citations/search",
+    r = requests.post("https://ntrs.nasa.gov/api/citations/search",
                      params={"q": query, "page.size": n}, timeout=60)
     r.raise_for_status()
     out = []
