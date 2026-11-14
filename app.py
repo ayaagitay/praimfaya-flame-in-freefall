@@ -11,7 +11,9 @@ Folder layout expected:
 Nothing here assumes column names: you pick columns in the UI until A confirms the real ones.
 """
 import json
+import os
 import re
+import sys
 import random
 import time
 from pathlib import Path
@@ -24,6 +26,19 @@ DATA_DIR = Path("psi_data/data_clean")
 BASS_FILE = "bassii_clean.csv"
 FLEX_FILE = "flex_clean.csv"
 RANKING_FILE = "flex_condition_ranking.csv"
+# Person B's AI code lives in psi_data/ai_tools.py
+sys.path.insert(0, str(Path("psi_data").resolve()))
+try:  # online (Streamlit Cloud): key comes from Secrets; locally: from psi_data/.env
+    if "GEMINI_API_KEY" in st.secrets:
+        os.environ.setdefault("GEMINI_API_KEY", st.secrets["GEMINI_API_KEY"])
+except Exception:
+    pass  # no secrets file locally: fine, ai_tools reads psi_data/.env
+try:
+    import ai_tools
+    AI_IMPORT_ERROR = None
+except Exception as e:
+    ai_tools, AI_IMPORT_ERROR = None, e
+
 st.set_page_config(page_title="Flame in Freefall", page_icon="🔥", layout="wide")
 
 # ---------- source labels (every number shows where it came from) ----------
@@ -32,7 +47,8 @@ BADGES = {
     "model": ":orange[MODEL - computed by our risk index]",
     "sim": ":red[SIMULATED - not real data]",
     "sensor": ":blue[LIVE SENSOR - Arduino air temp + light node, not a fire detector]",
-    "ai": ":violet[AI-GENERATED - verify before use]",
+    "ai": ":violet[AI-GENERATED from real data rows - verify before use]",
+    "template": ":orange[TEMPLATE - sentence built by code from real data rows, no AI]",
 }
 
 
@@ -165,6 +181,7 @@ with tab_ask:
             st.caption(f"{fuel} was tested on the ISS between {lo:.1f}% and {hi:.1f}% O2 "
                        "(Earth air is about 21%).")
             tol = c3.slider("Match tests within ± (% O2)", 1.0, 10.0, 3.0, 0.5)
+            st.session_state["ask_fuel"] = fuel
             hit = flex[(flex["fuel"] == fuel) & (flex["o2_pct_calc"].sub(o2).abs() <= tol)]
             st.session_state["selected_rows"] = hit
             badge("real")
@@ -294,20 +311,40 @@ with tab_bass:
         with st.expander("Raw table"):
             st.dataframe(bass, width="stretch", hide_index=True)
 
-# --- AI advisory ---
+# --- AI advisory (Person B: psi_data/ai_tools.py) ---
 with tab_ai:
-    badge("ai")
-    rows = st.session_state.get("selected_rows")
-    if rows is None or rows.empty:
-        st.info("Make a selection in 'Ask the data' first.")
-    elif st.button("Generate mission safety advisory"):
-        try:
-            from advisory import make_advisory  # Person B's module
-            st.write(make_advisory(rows.head(30)))
-        except ImportError:
-            st.warning("advisory.py not added yet (Person B).")
-        except Exception as e:
-            st.error(f"Advisory failed: {e}")
+    if ai_tools is None:
+        st.warning(f"Could not load psi_data/ai_tools.py: {AI_IMPORT_ERROR}")
+    elif rank is None:
+        st.info(f"{RANKING_FILE} not found.")
+    else:
+        st.write("Pick a FLEX test condition. The advisory uses **only** the matching ranking rows below.")
+
+        def pick(col, label, prefer=None):
+            opts = ["Any"] + sorted(rank[col].dropna().unique())
+            idx = opts.index(prefer) if prefer in opts else 0
+            v = st.selectbox(label, opts, index=idx, key=f"ai_{col}")
+            return None if v == "Any" else v
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            a_fuel = pick("fuel", "Fuel", st.session_state.get("ask_fuel"))
+        with c2:
+            a_dil = pick("diluent", "Added gas")
+        with c3:
+            a_o2 = pick("o2_level", "Oxygen level")
+        rows = ai_tools.select_rows(rank, fuel=a_fuel, diluent=a_dil, o2_level=a_o2, top_n=3)
+        badge("model")
+        st.dataframe(rows, width="stretch", hide_index=True)
+
+        use_ai = st.toggle("Use AI (Gemini)", value=True,
+                           help="Off = a fixed sentence built from the rows, no AI.")
+        if st.button("Generate mission safety advisory", disabled=rows.empty):
+            with st.spinner("Writing advisory..."):
+                result = ai_tools.advisory(rows, use_ai=use_ai)
+            badge("ai" if result["mode"] == "ai" else "template")
+            st.success(result["text"])
+            st.caption(result["note"])
 
 # --- Sensor node ---
 with tab_sensor:
