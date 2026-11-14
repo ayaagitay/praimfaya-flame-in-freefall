@@ -91,6 +91,9 @@ def numbers_ok(output, source_text):
 
 def advisory(rows, use_ai=True):
     """Returns {'text', 'mode', 'note'}.  mode is 'ai' or 'template' - show it on the dashboard."""
+    if rows is None or len(rows) == 0:
+        return {"text": "No FLEX test conditions match this selection.", "mode": "template",
+                "note": "No data rows selected; AI not called"}
     facts = facts_text(rows)
     if use_ai:
         top = rows.head(1)
