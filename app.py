@@ -20,7 +20,10 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
+
+import theme
 
 DATA_DIR = Path("psi_data/data_clean")
 BASS_FILE = "bassii_clean.csv"
@@ -40,20 +43,21 @@ except Exception as e:
     ai_tools, AI_IMPORT_ERROR = None, e
 
 st.set_page_config(page_title="Flame in Freefall", page_icon="🔥", layout="wide")
+theme.apply_theme()
 
 # ---------- source labels (every number shows where it came from) ----------
 BADGES = {
-    "real": ":green[REAL - NASA PSI data]",
-    "model": ":orange[MODEL - computed by our risk index]",
-    "sim": ":red[SIMULATED - not real data]",
-    "sensor": ":blue[LIVE SENSOR - Arduino air temp + light node, not a fire detector]",
-    "ai": ":violet[AI-GENERATED from real data rows - verify before use]",
-    "template": ":orange[TEMPLATE - sentence built by code from real data rows, no AI]",
+    "real": "Real · NASA PSI flight data",
+    "model": "Model · our calculation from real data",
+    "sim": "Simulated · not real data",
+    "sensor": "Live sensor · air temp + light, not a fire detector",
+    "ai": "AI-generated from real data rows · verify before use",
+    "template": "Template · built by code from real data rows, no AI",
 }
 
 
 def badge(kind: str):
-    st.caption(BADGES[kind])
+    theme.source_pill(kind, BADGES[kind])
 
 
 # ---------- data loading ----------
@@ -111,11 +115,12 @@ def read_sensor_line(ser):
     return msg
 
 
-# Simulator thresholds are OUR GUESSES until the hardware owner confirms the real ones.
-SIM_TEMP_LIMIT = 35.0   # alarm (same as the old node)
-SIM_TEMP_WARN = 32.0    # warning: "close to the limit" (guess)
-SIM_RISE_WARN = 1.5     # warning: rise in C between two readings (guess)
-SIM_LIGHT_LIMIT = 300   # alarm: node is for dark spaces, limit set low (guess)
+# Simulator thresholds = the real node's values (hardware/.ino):
+SIM_TEMP_LIMIT = 35.0   # alarm at or above (C)
+SIM_TEMP_WARN = 32.0    # warning at or above (C)
+SIM_RISE_WARN = 2.0     # warning if temp rose this much vs. 5 readings (~10 s) ago
+SIM_LIGHT_LIMIT = 800   # alarm at or above (0-1023, higher = brighter)
+SIM_HISTORY = 5
 
 # Which materials sit near each node. TEAM DECISION / ASSUMPTION, not NASA data.
 # Names must match exactly: a "fuel" in flex_clean.csv (e.g. "Heptane") or a
@@ -125,20 +130,42 @@ NODE_MATERIALS = {"01": []}
 LEVEL_STYLE = {"safe": ("🟢", "green"), "warning": ("🟡", "orange"), "alarm": ("🔴", "red")}
 
 
-def simulated_reading(prev_temp: float):
-    temp = max(15.0, min(45.0, prev_temp + random.uniform(-0.8, 1.2)))
-    light = random.randint(0, 40) if random.random() > 0.05 else random.randint(300, 700)
-    rise = temp - prev_temp
+def simulated_reading(hist: list):
+    """Same rules as the Arduino sketch, on made-up numbers."""
+    prev = hist[-1]["temp"] if hist else 24.0
+    # Hovers around 25 C; now and then a short heat event pushes it up.
+    event = st.session_state.get("sim_event", 0)
+    if event == 0 and random.random() < 0.03:
+        event = random.randint(4, 8)  # readings of heating
+    st.session_state["sim_event"] = max(0, event - 1)
+    drift = random.uniform(1.0, 2.5) if event else 0.2 * (25.0 - prev)
+    temp = round(max(15.0, min(45.0, prev + drift + random.uniform(-0.3, 0.3))), 1)
+    light = random.randint(150, 500) if random.random() > 0.05 else random.randint(820, 950)
+    past = [h["temp"] for h in hist if "temp" in h][-SIM_HISTORY:]
+    rise = temp - past[0] if len(past) == SIM_HISTORY else 0.0
     heat, bright = temp >= SIM_TEMP_LIMIT, light >= SIM_LIGHT_LIMIT
     if heat or bright:
         level = "alarm"
         reason = "both" if heat and bright else "heat" if heat else "light"
-    elif rise >= SIM_RISE_WARN or temp >= SIM_TEMP_WARN:
-        level, reason = "warning", "rise" if rise >= SIM_RISE_WARN else "heat"
+    elif rise >= SIM_RISE_WARN:
+        level, reason = "warning", "rise"
+    elif temp >= SIM_TEMP_WARN:
+        level, reason = "warning", "heat"
     else:
         level, reason = "safe", "none"
-    return {"node": "01", "temp": round(temp, 1), "light": light,
+    return {"node": "01", "temp": temp, "light": light,
             "hazard": int(level == "alarm"), "level": level, "reason": reason}
+
+
+def sensor_chart(hdf, col, title, color, limits):
+    """Line + soft fill, with the node's limits drawn as dashed lines."""
+    fig = go.Figure(go.Scatter(x=hdf["t"], y=hdf[col], mode="lines", line=dict(color=color, width=2.5),
+                               fill="tozeroy", fillcolor="rgba(255,255,255,0.03)", name=col))
+    for y, lvl in limits:
+        fig.add_hline(y=y, line=dict(color=theme.LEVEL_COLORS[lvl], dash="dash", width=1),
+                      annotation_text=f"{lvl} {y:g}", annotation_font_color=theme.LEVEL_COLORS[lvl])
+    fig.update_layout(title=title, height=280, showlegend=False)
+    return fig
 
 
 def level_of(reading: dict) -> str:
@@ -147,10 +174,6 @@ def level_of(reading: dict) -> str:
 
 
 # ---------- UI ----------
-st.title("🔥 Flame in Freefall")
-st.write("Real NASA fire experiments from the International Space Station, turned into fire-safety "
-         "answers for Moon and Mars missions.")
-
 flex = load(FLEX_FILE)
 bass = load(BASS_FILE)
 rank = load(RANKING_FILE)
@@ -159,6 +182,21 @@ if flex is not None:
                       "burn_time_s", "suppressant_frac_calc"])
 if bass is not None:
     bass = num(bass, ["o2_initial_pct", "o2_drop_pct_calc", "co_rise_ppm_calc", "air_start_cm_s_calc"])
+
+theme.topbar("PRAIMFAYA", "NASA Space Apps 2026 · Tashkent")
+theme.hero(
+    pill="NASA PSI · ISS combustion data",
+    kicker="Mission: fire safety beyond Earth",
+    title="Flame in<br>Freefall",
+    lead="Real fire experiments from the International Space Station, ranked and explained "
+         "to inform fire safety for Moon and Mars missions.",
+    stats=[
+        ("FLEX droplet tests", len(flex) if flex is not None else "-"),
+        ("BASS-II solid tests", len(bass) if bass is not None else "-"),
+        ("Fuels tested", flex["fuel"].nunique() if flex is not None else "-"),
+        ("Ranked conditions", len(rank) if rank is not None else "-"),
+    ],
+)
 
 tab_ask, tab_rank, tab_flex, tab_bass, tab_ai, tab_sensor, tab_about = st.tabs(
     ["Ask the data", "Fuel ranking", "FLEX explorer", "BASS-II explorer",
@@ -255,18 +293,21 @@ with tab_rank:
         badge("model")
         st.write("Fuel + atmosphere conditions from FLEX, ranked by flame intensity index (0-100). "
                  "Built from real ISS tests; the index itself is our calculation.")
-        dil = st.multiselect("Diluent", sorted(rank["diluent"].dropna().unique()),
+        dil = st.multiselect("Added gas (diluent)", sorted(rank["diluent"].dropna().unique()),
                              default=sorted(rank["diluent"].dropna().unique()))
         r = rank[rank["diluent"].isin(dil)].copy()
         r["condition"] = (r["fuel"] + " | " + r["diluent"] + " | " + r["o2_level"]
                           + r["low_data_flag"].map(lambda f: "  ⚠ few tests" if str(f) == "True" else ""))
         r = r.sort_values("flame_intensity_index_0_100")
-        fig = px.bar(r, x="flame_intensity_index_0_100", y="condition", color="fuel", orientation="h",
+        fig = px.bar(r, x="flame_intensity_index_0_100", y="condition", orientation="h",
+                     color="flame_intensity_index_0_100", color_continuous_scale=theme.THERMAL,
+                     range_color=[0, 100],
                      hover_data=["n_tests", "mean_burn_rate_mm2s", "extinction_share", "completion_share"],
                      labels={"flame_intensity_index_0_100": "Flame intensity index (0-100, higher = more intense)",
                              "condition": ""})
-        fig.update_layout(height=max(400, 28 * len(r)))
-        st.plotly_chart(fig, width="stretch")
+        fig.update_layout(height=max(400, 30 * len(r)), margin=dict(r=70),
+                          coloraxis_colorbar=dict(title="Index", thickness=12))
+        theme.chart(fig)
         st.caption("How the index is calculated: (Person A: paste the formula here). "
                    "⚠ = few tests behind this row (low_data_flag).")
         with st.expander("Full ranking table"):
@@ -280,16 +321,20 @@ with tab_flex:
         fuels = st.multiselect("Fuels", sorted(flex["fuel"].dropna().unique()),
                                default=sorted(flex["fuel"].dropna().unique()))
         f = flex[flex["fuel"].isin(fuels)]
-        st.plotly_chart(px.scatter(
+        theme.chart(px.scatter(
             f, x="o2_pct_calc", y="burn_rate_mm2s", color="fuel", symbol="test_end",
             hover_data=["test_id", "pressure_atm_calc", "droplet_d0_mm"],
             labels={"o2_pct_calc": "Oxygen (%)", "burn_rate_mm2s": "Burning rate K (mm²/s)",
-                    "test_end": "Outcome"},
-            title="Burning rate vs oxygen"), width="stretch")
-        st.plotly_chart(px.histogram(
+                    "test_end": "Outcome", "fuel": "Fuel"},
+            title="Burning rate vs oxygen"))
+        fig = px.histogram(
             f, x="fuel", color="test_end", barmode="group",
-            labels={"test_end": "Outcome", "fuel": "Fuel"}, title="How tests ended, by fuel"),
-            width="stretch")
+            color_discrete_map=theme.OUTCOME_COLORS,
+            category_orders={"test_end": list(theme.OUTCOME_COLORS)},
+            labels={"test_end": "Outcome", "fuel": "Fuel"}, title="How tests ended, by fuel")
+        fig.update_traces(marker_line_width=0, opacity=0.92)
+        fig.update_layout(bargap=0.28, bargroupgap=0.06, yaxis_title="Number of tests")
+        theme.chart(fig)
         with st.expander("Raw table"):
             st.dataframe(f, width="stretch", hide_index=True)
 
@@ -299,15 +344,19 @@ with tab_bass:
         badge("real")
         st.write(f"{len(bass)} solid-material burning tests on the ISS (BASS-II, PSI-25). "
                  "No flame-spread speed was recorded in this table.")
-        st.plotly_chart(px.histogram(
-            bass, x="material_group_calc", labels={"material_group_calc": "Material"},
-            title="Number of tests per material"), width="stretch")
-        st.plotly_chart(px.scatter(
+        counts = (bass["material_group_calc"].value_counts()
+                  .rename_axis("Material").reset_index(name="Tests"))
+        fig = px.bar(counts, x="Material", y="Tests", color="Tests",
+                     color_continuous_scale=theme.RED_RAMP, title="Number of tests per material")
+        fig.update_traces(marker_line_width=0)
+        fig.update_layout(coloraxis_showscale=False, bargap=0.35)
+        theme.chart(fig)
+        theme.chart(px.scatter(
             bass, x="air_start_cm_s_calc", y="o2_drop_pct_calc", color="material_group_calc",
             hover_data=["test_no", "material_raw", "o2_initial_pct"],
             labels={"air_start_cm_s_calc": "Air speed at start (cm/s)",
                     "o2_drop_pct_calc": "O2 drop (% points)", "material_group_calc": "Material"},
-            title="Chamber O2 drop vs air speed"), width="stretch")
+            title="Chamber O2 drop vs air speed"))
         with st.expander("Raw table"):
             st.dataframe(bass, width="stretch", hide_index=True)
 
@@ -356,8 +405,7 @@ with tab_sensor:
 
     if live:
         if mode == "Simulated":
-            prev = hist[-1]["temp"] if hist else 24.0
-            reading = simulated_reading(prev)
+            reading = simulated_reading(hist)
         else:
             try:
                 reading = read_sensor_line(open_serial(port))
@@ -376,12 +424,8 @@ with tab_sensor:
     if hist:
         last = hist[-1]
         lvl = level_of(last)
-        icon, color = LEVEL_STYLE.get(lvl, ("⚪", "gray"))
-        st.markdown(f"### {icon} Node {last.get('node', '?')}: :{color}[{lvl.upper()}]"
-                    f" (reason: {last.get('reason', 'n/a')})")
-        m1, m2 = st.columns(2)
-        m1.metric("Air temp (C)", last["temp"])
-        m2.metric("Light (0-1023)", last["light"])
+        theme.status_panel(lvl, last["temp"], last["light"], last.get("node", "?"),
+                           last.get("reason", "n/a"), last["t"])
 
         # Event -> NASA insight (the sensor calls up the data, never the reverse)
         if lvl in ("warning", "alarm"):
@@ -403,8 +447,13 @@ with tab_sensor:
                         width="stretch", hide_index=True)
 
         hdf = pd.DataFrame(hist)
-        st.line_chart(hdf.set_index("t")[["temp"]])
-        st.line_chart(hdf.set_index("t")[["light"]])
+        c1, c2 = st.columns(2)
+        with c1:
+            theme.chart(sensor_chart(hdf, "temp", "Air temperature (C)", theme.THERMAL[4],
+                                     [(SIM_TEMP_WARN, "warning"), (SIM_TEMP_LIMIT, "alarm")]))
+        with c2:
+            theme.chart(sensor_chart(hdf, "light", "Light (0-1023)", theme.THERMAL[2],
+                                     [(SIM_LIGHT_LIMIT, "alarm")]))
         events = [h for h in hist if level_of(h) != "safe"]
         if events:
             with st.expander(f"Event log ({len(events)})"):
