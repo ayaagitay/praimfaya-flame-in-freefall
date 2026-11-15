@@ -1,20 +1,16 @@
 """
-Flame in Freefall - dashboard skeleton (Person C).
-Run:  pip install streamlit pandas plotly pyserial
-      streamlit run app.py
-
-Folder layout expected:
-  data/            <- Person A drops cleaned CSVs here (e.g. bass2_clean.csv, flex_clean.csv)
-  data/ranking.csv <- optional, Person A's ranking output
-  advisory.py      <- optional, Person B's module exposing make_advisory(df) -> str
-
-Nothing here assumes column names: you pick columns in the UI until A confirms the real ones.
+Flame in Freefall - dashboard (Team Praimfaya).
+Run:  python -m pip install -r requirements.txt
+      python -m streamlit run app.py
+Data: psi_data/data_clean/*.csv   AI: psi_data/ai_tools.py   Style: theme.py
 """
 import json
 import os
 import re
+import collections
 import sys
 import random
+import threading
 import time
 from pathlib import Path
 
@@ -95,24 +91,45 @@ def o2_bin_range(label: str):
 
 
 # ---------- sensor ----------
+class SerialReader:
+    """Reads the Arduino in a background thread, all the time, so no line ever waits on the port.
+    Each line is time-stamped the moment it arrives."""
+
+    def __init__(self, port: str):
+        import serial
+        self.ser = serial.Serial(port, 9600, timeout=1)
+        self.queue = collections.deque(maxlen=300)
+        self.error = None
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while True:
+            try:
+                raw = self.ser.readline().decode("utf-8", errors="ignore").strip()
+            except Exception as e:      # cable unplugged, port closed...
+                self.error = e
+                return
+            if not raw:
+                continue
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue                # partial line at startup, skip
+            if isinstance(msg, dict):
+                msg["t"] = time.strftime("%H:%M:%S")
+                self.queue.append(msg)
+
+    def drain(self):
+        out = []
+        while self.queue:
+            out.append(self.queue.popleft())
+        return out
+
+
 @st.cache_resource
 def open_serial(port: str):
     # Cached on purpose: opening the port resets the Arduino UNO, so open it ONCE.
-    import serial
-    return serial.Serial(port, 9600, timeout=3)
-
-
-def read_sensor_line(ser):
-    raw = ser.readline().decode("utf-8", errors="ignore").strip()
-    if not raw:
-        return None
-    try:
-        msg = json.loads(raw)
-    except json.JSONDecodeError:
-        return None  # partial line at startup, skip
-    if "error" in msg:  # {"error":"dht"}
-        return {"error": msg["error"]}
-    return msg
+    return SerialReader(port)
 
 
 # Simulator thresholds = the real node's values (hardware/.ino):
@@ -399,69 +416,78 @@ with tab_ai:
 with tab_sensor:
     st.write("Always-on watchdog node (concept prototype): air temperature and light only. **It does not detect fire or short circuits.**")
     mode = st.radio("Source", ["Simulated", "Live USB"], horizontal=True)
-    port = st.text_input("Serial port", "COM3") if mode == "Live USB" else None
+    port = st.text_input("Serial port", "COM6") if mode == "Live USB" else None
     live = st.toggle("Run")
     hist = st.session_state.setdefault("sensor_hist", [])
 
-    if live:
-        if mode == "Simulated":
-            reading = simulated_reading(hist)
-        else:
-            try:
-                reading = read_sensor_line(open_serial(port))
-            except Exception as e:
-                st.error(f"Serial error: {e}")
-                reading = None
-        if reading and "error" in reading:
-            st.warning("DHT11 read failed, skipping this reading.")
-        elif reading:
-            reading["t"] = time.strftime("%H:%M:%S")
-            reading["source"] = "sim" if mode == "Simulated" else "sensor"
-            hist.append(reading)
+    # Only this panel refreshes (not the whole page): every 0.3 s for the live node, every 2 s simulated.
+    every = (2.0 if mode == "Simulated" else 0.3) if live else None
+
+    @st.fragment(run_every=every)
+    def sensor_panel():
+        if live:
+            if mode == "Simulated":
+                readings = [simulated_reading(hist)]
+            else:
+                try:
+                    reader = open_serial(port)
+                    readings = reader.drain()
+                    if reader.error:
+                        st.error(f"Lost the sensor: {reader.error}. Check the cable, then switch Run off and on.")
+                        open_serial.clear()
+                except Exception as e:
+                    st.error(f"Serial error: {e}")
+                    readings = []
+            for reading in readings:
+                if "error" in reading:
+                    st.warning("DHT11 read failed, skipping this reading.")
+                    continue
+                reading.setdefault("t", time.strftime("%H:%M:%S"))
+                reading["source"] = "sim" if mode == "Simulated" else "sensor"
+                hist.append(reading)
             del hist[:-100]
 
-    badge("sim" if mode == "Simulated" else "sensor")
-    if hist:
-        last = hist[-1]
-        lvl = level_of(last)
-        theme.status_panel(lvl, last["temp"], last["light"], last.get("node", "?"),
-                           last.get("reason", "n/a"), last["t"])
+        badge("sim" if mode == "Simulated" else "sensor")
+        if hist:
+            last = hist[-1]
+            lvl = level_of(last)
+            theme.status_panel(lvl, last["temp"], last["light"], last.get("node", "?"),
+                               last.get("reason", "n/a"), last["t"])
 
-        # Event -> NASA insight (the sensor calls up the data, never the reverse)
-        if lvl in ("warning", "alarm"):
-            st.warning(f"{lvl.upper()} at node {last.get('node', '?')} ({last['t']}), reason: {last.get('reason')}")
-            mats = NODE_MATERIALS.get(last.get("node", ""), [])
-            if not mats:
-                st.caption("No materials assigned to this node yet (NODE_MATERIALS in app.py).")
-            else:
-                st.write(f"NASA data for materials near this node: {', '.join(mats)}")
-                if rank is not None and rank["fuel"].isin(mats).any():
-                    badge("model")
-                    st.dataframe(rank[rank["fuel"].isin(mats)].sort_values(
-                        "flame_intensity_index_0_100", ascending=False),
-                        width="stretch", hide_index=True)
-                if bass is not None and bass["material_group_calc"].isin(mats).any():
-                    badge("real")
-                    st.dataframe(bass[bass["material_group_calc"].isin(mats)][
-                        ["test_no", "material_raw", "o2_initial_pct", "o2_drop_pct_calc", "co_rise_ppm_calc"]],
-                        width="stretch", hide_index=True)
+            # Event -> NASA insight (the sensor calls up the data, never the reverse)
+            if lvl in ("warning", "alarm"):
+                st.warning(f"{lvl.upper()} at node {last.get('node', '?')} ({last['t']}), reason: {last.get('reason')}")
+                mats = NODE_MATERIALS.get(last.get("node", ""), [])
+                if not mats:
+                    st.caption("No materials assigned to this node yet (NODE_MATERIALS in app.py).")
+                else:
+                    st.write(f"NASA data for materials near this node: {', '.join(mats)}")
+                    if rank is not None and rank["fuel"].isin(mats).any():
+                        badge("model")
+                        st.dataframe(rank[rank["fuel"].isin(mats)].sort_values(
+                            "flame_intensity_index_0_100", ascending=False),
+                            width="stretch", hide_index=True)
+                    if bass is not None and bass["material_group_calc"].isin(mats).any():
+                        badge("real")
+                        st.dataframe(bass[bass["material_group_calc"].isin(mats)][
+                            ["test_no", "material_raw", "o2_initial_pct", "o2_drop_pct_calc", "co_rise_ppm_calc"]],
+                            width="stretch", hide_index=True)
 
-        hdf = pd.DataFrame(hist)
-        c1, c2 = st.columns(2)
-        with c1:
-            theme.chart(sensor_chart(hdf, "temp", "Air temperature (C)", theme.THERMAL[4],
-                                     [(SIM_TEMP_WARN, "warning"), (SIM_TEMP_LIMIT, "alarm")]))
-        with c2:
-            theme.chart(sensor_chart(hdf, "light", "Light (0-1023)", theme.THERMAL[2],
-                                     [(SIM_LIGHT_LIMIT, "alarm")]))
-        events = [h for h in hist if level_of(h) != "safe"]
-        if events:
-            with st.expander(f"Event log ({len(events)})"):
-                st.dataframe(pd.DataFrame(events)[::-1], width="stretch")
+            hdf = pd.DataFrame(hist)
+            c1, c2 = st.columns(2)
+            with c1:
+                theme.chart(sensor_chart(hdf, "temp", "Air temperature (C)", theme.THERMAL[4],
+                                         [(SIM_TEMP_WARN, "warning"), (SIM_TEMP_LIMIT, "alarm")]))
+            with c2:
+                theme.chart(sensor_chart(hdf, "light", "Light (0-1023)", theme.THERMAL[2],
+                                         [(SIM_LIGHT_LIMIT, "alarm")]))
+            events = [h for h in hist if level_of(h) != "safe"]
+            if events:
+                with st.expander(f"Event log ({len(events)})"):
+                    st.dataframe(pd.DataFrame(events)[::-1], width="stretch")
 
-    if live:
-        time.sleep(2)  # matches the Arduino's 2000 ms interval
-        st.rerun()
+
+    sensor_panel()
 
 # --- Sources ---
 with tab_about:
