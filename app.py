@@ -494,16 +494,26 @@ with tab_about:
     st.markdown(
         """
 **Data**
-- FLEX (Flame Extinguishment Experiment), NASA PSI-69, DOI 10.60555/mbq8-0451 - `flex_clean.csv`
-- BASS-II (Burning and Suppression of Solids II), NASA PSI-25, DOI 10.60555/4qc4-de67 - `bassii_clean.csv`
-- Downloaded from the NASA Physical Sciences Informatics (PSI) repository, cleaned by our team (`clean_data.py`)
+- FLEX (Flame Extinguishment Experiment), NASA PSI-69,
+  [DOI 10.60555/mbq8-0451](https://doi.org/10.60555/mbq8-0451) - `flex_clean.csv`
+- BASS-II (Burning and Suppression of Solids II), NASA PSI-25,
+  [DOI 10.60555/4qc4-de67](https://doi.org/10.60555/4qc4-de67) - `bassii_clean.csv`
+- Downloaded from the [NASA Physical Sciences Informatics (PSI) repository](https://science.nasa.gov/biological-physical/data),
+  cleaned by our team (`clean_data.py`)
 
-**Background**
-- *A Researcher's Guide to: Combustion Science*, NASA ISS Program Science Office, Oct 2015
-- NASA Technical Reports Server (NTRS) papers used for AI summaries
+**AI**
+- Advisory text: Google Gemini (`gemini-3.5-flash-lite`), given only the selected ranking rows.
+  Text with a number that is not in the data is rejected and a template sentence is used instead.
+
+**Sensor**
+- Our own Arduino UNO node (DHT11 temperature sensor + light sensor). Concept prototype, not a fire detector.
+
+**Project**
+- Code: [github.com/ayaagitay/praimfaya-flame-in-freefall](https://github.com/ayaagitay/praimfaya-flame-in-freefall)
 
 **Labels used on every page**
 - REAL = NASA flight data, MODEL = our calculation (ranking index), SIMULATED = generated test data,
-  LIVE SENSOR = our Arduino node (air temperature + light only), AI = LLM-written text
+  LIVE SENSOR = our Arduino node (air temperature + light only), AI-GENERATED = LLM-written text,
+  TEMPLATE = sentence built by our code from real data rows
 """
     )
