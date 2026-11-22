@@ -1,12 +1,14 @@
 # Praimfaya: Flame in Freefall
 
+<a href="https://youtu.be/_kWYTCizpRY">
+  <img src="https://img.youtube.com/vi/_kWYTCizpRY/hqdefault.jpg" alt="Watch the demo video" width="250" align="right">
+</a>
+
 Dashboard that ranks and explains NASA microgravity combustion experiments (BASS-II, FLEX) to inform fire safety for Moon and Mars missions. NASA Space Apps Challenge 2026, Flame in Freefall.
 
 **Link to the dashboard:** [https://praimfaya-flame-in-freefall.streamlit.app/](https://praimfaya-flame-in-freefall.streamlit.app/)
 
-## Demo Video
-
-[![Watch the demo video](https://img.youtube.com/vi/_kWYTCizpRY/maxresdefault.jpg)](https://youtu.be/_kWYTCizpRY)
+**Demo video:** [Watch on YouTube](https://youtu.be/_kWYTCizpRY)
 
 
 ## Dashboard status: hackathon prototype
